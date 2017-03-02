@@ -1,0 +1,911 @@
+---
+title: "Logistics individual work- Forecast"
+author: "Alex Romanenko"
+date: "4 February 2017"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir="C:/Users/alexr/Documents/AR/Imperial/Modules/4.3 Logistics and Supply-Chain Analytics/Exercises/Individual Project/Data")
+```
+
+```{r, include=FALSE}
+library(forecast)
+library(tseries)
+library(ggplot2) 
+library(reshape)
+library(lubridate)
+library(car)
+library(xtable)
+```
+#### **General Approach**
+
+The purpose of the exercise is to predict demand for lettuce (in ounces) during two weeks period following the provided data. In order to do this, the following will be conducted:
+
+1. Data preparation. The available data will be checked for any potential outliers or whether any other changes are required. Once the data is ready for analysis, it will be divided into a training and validation sets.
+
+2. Model Training. Holt-Winters (both *HoltWinters()* and *ets*) and ARIMA models will be used. The most appropriate models will be selected based on the training set. The split will be roughly 80/20 with validation set consisting of last 3 weeks and the remainder (the length depends of the store) will form the validation set.
+
+3. Model Validation. The selected models will be validated using the validation data set by choosing the model with the lowest residual mean squared errors (RMSE).
+
+4. Forecast. The optimal model selected during the validation process will be used to predict the final forecast for lettuce.
+
+The report will be based on data from 4 US stores.
+
+### **1. Data preparation**
+
+####**1.1 Missing values check**
+
+By manipulating the provided data I have come up with the final 4 data sets per each store, which shows amount of lettuce used per store per day in ounces.
+
+First of all, let's look at the data per store: Ninth Street, Berkeley (cal1- 46673); Shattuck Sq, Berkeley (cal2- 4904); Myrtle Avenue, Ridgewood (ny1- 12631) and Whitney Avenue, Elmhurst(ny2- 20974).                  
+
+```{r, echo=FALSE}
+demand <- read.csv ("Total Demand AR3.csv", header= TRUE)
+demand.store <- cast(demand,date ~ StoreNumber, sum, value= "daily.dem")
+
+demand.store[1:18,-1]
+
+```
+
+We can clearly see that for stores 4904 and 20974 there are some missing values. Therefore, for the purpose of this exercise, I will use data starting from 13/03/15 for 4904 and data starting from 20/03/15 for 20974. There are no other missing values to deal with at this point.
+
+```{r, include=FALSE}
+#Assigning dataframes for the 4 stores: 46673 (cal1); 4904 (cal2); 12631 (ny1); 20974 (ny2)
+
+cal1.t <- subset(demand,StoreNumber == 46673 )[3:4]
+cal1 <- ts(cal1.t[,2], frequency = 7) 
+
+cal2.t <- subset(demand,StoreNumber == 4904  )[-1,3:4]
+cal2 <- ts(cal2.t[,2], frequency = 7)
+
+ny1.t  <- subset(demand,StoreNumber == 12631 )[3:4]
+ny1 <- ts(ny1.t[,2], frequency = 7)
+
+ny2.t  <- subset(demand,StoreNumber == 20974 )[-6:-1,3:4]
+ny2 <- ts(ny2.t[,2], frequency = 7)
+
+```
+
+
+####**1.2 Outliers check**
+
+Next step is to check if there are any outliers, which might affect training of our model. The outliers will be checked by normalising the values in data frames using z-score and highlighting if there are any absolute values higher than 3.
+
+```{r, include=FALSE}
+cal1.t[abs(scale(cal1))>3]
+cal2.t[abs(scale(cal2))>3]
+ny1.t[abs(scale(ny1))>3]
+ny2.t[abs(scale(ny2))>3]
+```
+
+Z- normalisation test shows that Whitney Avenue, Elmhurst (ny2) has two potential outliers on 15-04-04 and 15-06-11. Let's see if these outliers 'stand out' when plotting the time series:
+
+```{r, echo=FALSE}
+plot.ts(ny2, main="Potential Outliers- Whitney Avenue, Elmhurst (ny2)
+", ylab="Daily Demand")
+points(x=3.15,y=23, col="red",cex=4,pch=21,lwd=2.5)
+points(x=12.85,y=380, col="red",cex=4,pch=21,lwd=2.5)
+
+```
+
+We can clearly see that for ny2 plot, the two values are outliers, therefore in order to ensure that forecasts are not skewed, I will replace these values with averages for respective weekdays over the ny2 time series:
+
+```{r, include=FALSE}
+
+val1<- ny2[seq(2,length(ny2),7)]
+avg1<- (sum(ny2[seq(2,length(ny2),7)])-16)/ (length(val1)-1)
+
+val2<- ny2[seq(7,length(ny2),7)]
+avg2<- (sum(ny2[seq(7,length(ny2),7)])-380)/ (length(val2)-1)
+
+```
+
+Based on the means (which exclude outliers), we get the following 'new' values for the days where outliers are observed:
+
+15-04-04 - 167
+15-06-11 - 233
+
+```{r, echo=FALSE}
+ny2[16]=167
+ny2[84]=233
+
+plot.ts(ny2, main="Outliers replaced- Whitney Avenue, Elmhurst (ny2)", ylab="Daily Demand")
+
+```
+
+We can see from the plot above that the graph looks much better (no clear outliers). The data is now ready to be used for forecasts.
+
+####**1.3 Training/ Validation split**
+
+```{r, include=FALSE}
+#ny1 
+ny1.train <- ts(ny1[1: (length(ny1)-21)], frequency=7)
+ny1.val <-  ts(ny1[(length(ny1)-20):length(ny1)], frequency=7)
+
+
+#ny2 
+ny2.train <- ts(ny2[1: (length(ny2)-21)], frequency=7)
+ny2.val <-  ts(ny2[(length(ny2)-20):length(ny2)], frequency=7)
+
+
+#cal1 
+cal1.train <- ts(cal1[1: (length(cal1)-21)], frequency=7)
+cal1.val <-  ts(cal1[(length(cal1)-20):length(cal1)], frequency=7)
+  
+
+#cal2
+cal2.train <- ts(cal2[1: (length(cal2)-21)] , frequency=7)
+cal2.val <- ts(cal2[(length(cal2)-20):length(cal2)] , frequency=7)
+
+```
+
+As discussed above, the data sets for the 4 stores will be split into a training and validation sets with validation sets consisting of last 3 weeks of the time series.
+
+***
+
+### **2. Model training**
+####**2.1 Holt-Winters method**
+
+I will start training the model by applying Holt-Winters method to the 4 data sets. Holt-Winters method aims to calculate optimal alpha (error type), beta (trend type) and gamma (seasonality) by minimising sum of squared errors.
+
+I will use the following steps for every one of the 4 stores:
+
+1. To better understand nature of the demand fluctuations, I will decompose a time series into seasonal, trend and irregular components using loess (stl function). This information will be used to set parameters of predictive models.
+2. Application of Holt-Winters model using *HoltWinters* and *ets* functions.
+
+####**Myrtle Avenue, Ridgewood (ny1)**
+
+**1. Demand Decomposition**
+
+
+```{r, echo=FALSE}
+plot(stl(ny1, s.window = "periodic"), main= "Demand Decomposition- Myrtle Avenue, Ridgewood (ny1)")
+
+```
+
+Findings: 
+Seasonality: There is a clear seasonality, however the impact is not very significant. 
+Trend: There is a slight increase in demand around weeks 8 and 9, after which the trend somewhat stabilised towards the end of the period. The variation is constant with relative significance
+Remainder: The error is relatively significant
+
+**2 Holt Winters & ETS**
+
+As discussed above, the seasonality will not be taken into account when estimating the demand using HW model. While for ETS an automatic selection will be used (ZZZ as parameters)
+
+```{r, echo=FALSE}
+#running hw and ets
+ny1.hw <- HoltWinters(ny1.train, gamma= FALSE)
+ny1.ets <- ets(ny1.train,model="ZZZ")
+
+ny1.hw
+
+```
+
+Low value for alpha (0.111) indicates that the estimate of the demand will be based on observations throughout the time series (as opposed to simply basing it on last few weeks). Low beta (0.176) indicates lack of trend. Gamma was set as FALSE as there appear to be insignificant seasonality.    
+
+``` {r, echo=FALSE}
+ny1.ets
+```
+
+The most suitable ETS model (M,N,M) indicates results similar to the HW model, where the trend should not be taken into account using the predict model.However the seasonality, together with error parameter is set to be multiplicative.
+
+```{r, echo=FALSE}
+plot(ny1.hw, main ="Holt Winters (Myrtle Avenue, Ridgewood (ny1))",ylab="Daily Demand")
+legend(0.9,375, c("Holt-Winters", "ETS"), lty=c("solid","dashed"), col=c("red","blue"))
+lines(fitted(ny1.ets), col = "blue", lty = 2)
+```
+
+The plot above shows that both HW and ETS produce similar results based on the demand of a training data set.
+
+####**Whitney Avenue, Elmhurst (ny2)**
+
+**1. Demand Decomposition**
+
+
+```{r, echo=FALSE}
+plot(stl(ny2.train, s.window = "periodic"), main= "Demand Decomposition- Whitney Avenue, Elmhurst (ny2)")
+
+```
+
+Findings: 
+Seasonality: There is a clear seasonality, however the impact is not significant 
+Trend: There is an increase in demand between weeks 4 and 8, after which the trend decreases with a slight increase towards the end of the period. The variation is constant, however the trend is insignificant
+Remainder: The error is relatively significant
+
+**2 Holt Winters & ETS**
+
+Based on the above observations, the seasonality will not be taken into account when estimating the demand using HW model. For ETS an automatic selection will be used (ZZZ as parameters)
+
+```{r, echo=FALSE}
+#running hw and ets
+ny2.hw <- HoltWinters(ny2.train, gamma= FALSE)
+ny2.ets <- ets(ny2.train,model="ZZZ")
+
+ny2.hw
+```
+
+Similarly to ny1, ny2 has relatively high value for alpha (0.641) indicate that the estimate of the demand will be based on recent observations as well as some of the observations in the past. Low beta (0.153) indicates lack of trend. Gamma was set as FALSE as there appear to be insignificant seasonality.    
+
+```{r, echo=FALSE}
+ny2.ets
+```
+
+The most suitable ETS model (M,A,A) indicates results different to hw model. Interestingly the automatic ETS model have chosen to include seasonality and the trend as additive parameters. The error parameter is set to be multiplicative
+
+```{r, echo=FALSE}
+plot(ny2.hw, main ="Holt Winters- Whitney Avenue, Elmhurst (ny2)",ylab="Daily Demand")
+legend(8,335, c("Holt-Winters", "ETS"), lty=c("solid","dashed"), col=c("red","blue"))
+lines(fitted(ny2.ets), col = "blue", lty = 2)
+```
+
+The plot above shows that both HW and ETS produce similar results.
+
+
+####**Ninth Street, Berkeley (cal1)**
+
+**1. Demand Decomposition**
+
+
+```{r, echo=FALSE}
+plot(stl(cal1.train, s.window = "periodic"), main= "Demand Decomposition- Ninth Street, Berkeley (cal1)")
+```
+
+Findings: 
+Seasonality: There is a clear seasonality and it is shown to be fairly significant. 
+Trend: There is a slight increase in demand around week 4, after which the trend somewhat stabilised towards the end of the period. Overall the trend changes a lot over time with a gradual decline towards the end. However the significance level is low and therefore should not be used in the predictive model.
+Remainder: The error is significant.
+
+**2 Holt Winters & ETS**
+
+The seasonality will be taken into account when estimating the demand using HW model. While for ETS an automatic selection will be used (ZZZ as parameters)
+
+```{r, echo=FALSE}
+#running hw and ets
+cal1.hw <- HoltWinters(cal1.train)
+cal1.ets <- ets(cal1.train,model="ZZZ")
+
+cal1.hw
+
+```
+
+Extremely low value for alpha (0.063) indicates that the estimate of the demand will be based on observations throughout the time series. Beta is equals to 0, which confirms our initial observation that the slope of the trend should not be taken into account- according to the model it is not represented over the time series and is set to be equal to its initial value. Gamma is relatively low (0.379), which indicates that the seasonality prediction will be based on majority of observations in the time series.    
+
+```{r, echo=FALSE}
+cal1.ets
+```
+
+The most suitable ETS model (A,N,A) indicates results similar to the HW model, trend set to N and error trend and seasonality are set to additive. 
+
+```{r, echo=FALSE}
+plot(cal1.hw, main ="Holt Winters- Ninth Street, Berkeley (cal1)",ylab="Daily Demand")
+legend(10, 227, c("Holt-Winters", "ETS"), lty=c("solid","dashed"), col=c("red","blue"))
+lines(fitted(cal1.ets), col = "blue", lty = 2)
+```
+
+The plot above shows that both HW and ETS produce very similar results when analysing the demand of a training data set.
+
+***
+
+####**Shattuck Sq, Berkeley (cal2)**
+
+**1. Demand Decomposition**
+
+```{r, echo=FALSE}
+plot(stl(cal2.train, s.window = "periodic"), main= "Demand Decomposition- Shattuck Sq, Berkeley (cal2)")
+
+```
+Findings: 
+Seasonality: There is a clear seasonality and although it is not as significant as for cal1, there is still some sense to include it in our prediction model. 
+Trend: Overall the trend changes a lot over time. The significance level is low and therefore trend impact should not be used in the predictive model.
+Remainder: The error is relatively significant (although less than for other stores).
+
+####**2 Holt Winters & ETS**
+
+The seasonality will be taken into account when estimating the demand using HW model. While for ETS an automatic selection will be used (ZZZ as parameters).
+
+```{r, echo=FALSE}
+#running hw and ets
+cal2.hw <- HoltWinters(cal2.train)
+cal2.ets <- ets(cal2.train,model="ZZZ")
+
+cal2.hw
+
+```
+
+Low value for alpha (0.175) indicates that the estimate of the demand will be based on strong majority observations throughout the time series. Beta is 0.087, which is similar to observation in cal1, which states that the slope of the trend should not be taken into account- according to the model it is not represented over the time series and is set to be equal to its initial value. Gamma is in a medium range, which indicates that the seasonality prediction will be based on majority of latest observations ans some in the first half of the time series.    
+
+```{r, echo=FALSE}
+cal2.ets
+```
+
+The most suitable ETS model (A,A,A) indicates results similar to the HW model except for the trend, which is set to Additive as well as error trend and seasonality. 
+
+```{r, echo=FALSE}
+plot(cal2.hw, main ="Holt Winters- Shattuck Sq, Berkeley (cal2)",ylab="Daily Demand")
+legend(11.4,460, c("Holt-Winters", "ETS"), lty=c("solid","dashed"), col=c("red","blue"))
+lines(fitted(cal2.ets), col = "blue", lty = 2)
+```
+
+The plot above shows that both HW and ETS produce very similar results when analysing the demand of a training data set.
+
+***
+
+#### **3.2 ARIMA method**
+
+The method aims to analyse the behaviour of time series using maximum likelihood approach based on two components: autoregressive (AR - *q*) and moving average (MA - *p*). The key feature of the model is to have a stationary time-series(i.e. it should be 'stripped-out' of trends). This is mainly achieved by differencing the time-series n times.
+
+The method for ARIMA model includes the following steps:
+
+1. Identification.  The time series will be tested for stationarity. If required, n differentiation will be performed to make it stationary.
+2. Estimation. AUTOARIMA function will be used. This step will also include testing based on maximum likelihood estimators.
+3. Verification. The model will be tested using residual analysis and assessed based on the conducted tests.
+
+***
+
+#### **Myrtle Avenue, Ridgewood (ny1)**
+
+**1. Identification**
+
+```{r, include=FALSE}
+ndiffs(ny1.train)
+nsdiffs(ny1.train)
+ny1.df1 <- diff (ny1.train, differences=1)
+
+adf.test(ny1.df1)
+pp.test(ny1.df1)
+
+```
+
+Results of the test show the following:
+Required differencing: 1
+required seasonal differencing: 0
+
+Following the first level of differencing, both adf and pp tests (p values < 0.01) show that the time series is now stationary.
+
+The next step is to test the time series on autocorrelations using ACF (Autocorrelation Function). The autocorrelations is one indication that ARIMA could potentially model the time series. PACF (Partial Autocorrelation Function) is another tool, which is used for revealing correlations within time series. q (Moving averages) and p (autoregression) coefficients will be estimated using these approaches 
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(ny1.df1, lag.max = 20)  
+pacf(ny1.df1, lag.max = 20) 
+```
+
+We can see from the graph above that for Myrtle Avenue, Ridgewood (ny1), the model should have q <=5 and p <=4
+
+**2.Estimation**
+
+
+```{r, eval=FALSE, include=FALSE}
+auto.arima(ny1.train, trace = TRUE, ic = 'bic', stepwise=FALSE)
+
+```
+
+By Running auto.arima() function, we have the following model with the best BIC score:
+
+Series: ny1.train 
+ARIMA(0,1,1)(1,0,0)[7]                    
+
+Coefficients:
+          ma1    sar1
+      -0.9115  0.3425
+s.e.   0.0480  0.1090
+
+sigma^2 estimated as 1656:  log likelihood=-415.25
+AIC=836.51   AICc=836.82   BIC=843.69
+
+It is important to note that these parameters fit findings of the 'identification' section.
+
+#### **3. Model Validation**
+
+**3.1 Model Fit**
+```{r, echo=FALSE}
+ny1.arima <- Arima(ny1.train, order = c(0, 1, 1), seasonal = list(order = c(1, 0, 0), period = 7), include.drift = FALSE)
+
+plot(ny1.train, main ="ARIMA- Myrtle Avenue, Ridgewood (ny1)",ylab="Daily Demand")
+lines(fitted(ny1.arima), col = "blue", lty = 2)
+```
+
+From the graph above, we can see that ARIMA model follows the training set well.
+
+**3.2 Model Residuals Diagnostic**
+
+The model diagnostic will be conducted by looking at 3 areas:
+1. Standardised Residuals. Ideally we do not want to see any clusters of volatility
+2. ACF shows no significant correlation between the residuals
+3. Ljung-Box statistics. We want to see p-values above the interval. This will indicate that there is no pattern in the residuals 
+
+```{r, echo=FALSE}
+tsdiag(ny1.arima)
+```
+
+The graphs show:
+1. Stadardised Residuals: No clusters of volatility for standardised residuals
+2. ACF of residuals: No significant correlation between the residuals
+3. p values for L-B statistics: all p values are large- no pattern in residuals.
+
+Based on the above analysis, the model is fit for purpose.
+
+***
+
+#### **Whitney Avenue, Elmhurst (ny2)**
+
+**1. Identification**
+
+```{r, include=FALSE}
+ndiffs(ny2.train)
+nsdiffs(ny2.train)
+ny2.df1 <- diff (ny2.train, differences=1)
+
+adf.test(ny2.df1)
+pp.test(ny2.df1)
+
+adf.test(ny2.train)
+pp.test(ny2.train)
+
+```
+
+Results of the test show the following:
+Required differencing: 0
+required seasonal differencing: 1
+
+After testing the model with no differentiation- adf test rejected null hypothesis (being stationary), where pp test failed to reject it. Following the first level of differencing, both adf and pp tests (p values < 0.01) show that the time series is now stationary.
+
+The next step is to test the time series on autocorrelations using ACF (Autocorrelation Function):
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(ny2.df1, lag.max = 20)  
+pacf(ny2.df1, lag.max = 20) 
+```
+
+We can see from the graph above that for Whitney Avenue, Elmhurst (ny2), the model should have q <=2 and p <=2
+
+**2.Estimation**
+
+```{r, eval=FALSE, include=FALSE}
+auto.arima(ny2.train, trace = TRUE, ic = 'bic', stepwise=FALSE)
+
+```
+
+By Running auto.arima() function, we have the following model with the best BIC score:
+
+Series: ny2.train 
+ARIMA(0,1,1)(0,1,1)[7]                    
+
+Coefficients:
+          ma1     sma1
+      -0.7675  -0.8735
+s.e.   0.0915   0.3707
+
+sigma^2 estimated as 1787:  log likelihood=-308.94
+AIC=623.89   AICc=624.33   BIC=630.12
+
+It is important to note that these parameters fit findings of the 'identification' section.
+
+#### **3. Model Validation**
+
+**3.1 Model Fit**
+```{r, echo=FALSE}
+ny2.arima <- Arima(ny2.train, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 1), period = 7), include.drift = FALSE)
+
+plot(ny2.train, main ="ARIMA- Whitney Avenue, Elmhurst (ny2)",ylab="Daily Demand")
+lines(fitted(ny2.arima), col = "blue", lty = 2)
+```
+
+From the graph above, we can see that ARIMA model follows the training set well.
+
+**3.2 Model Residuals Diagnostic**
+
+```{r, echo=FALSE}
+tsdiag(ny2.arima)
+```
+
+The graphs show:
+1. Stadardised Residuals: No clusters of volatility for standardised residuals
+2. ACF of residuals: No significant correlation between the residuals
+3. p values for L-B statistics: most p values are large- no clear pattern in residuals.
+
+Based on the above analysis, the model is fit for purpose.
+
+***
+
+#### **Ninth Street, Berkeley (cal1)**
+
+**1. Identification**
+
+```{r, include=FALSE}
+ndiffs(cal1.train)
+nsdiffs(cal1.train)
+cal1.df1 <- diff (cal1.train, differences=1)
+
+adf.test(cal1.df1)
+pp.test(cal1.df1)
+
+adf.test(cal1.train)
+pp.test(cal1.train)
+
+```
+
+Results of the test show the following:
+Required differencing: 0
+required seasonal differencing: 0
+
+The tests show that there is no need in differentiating the data series. After testing the model with no differentiation- both adf and pp tests confirmed stationarity. 
+
+The next step is to test the time series on autocorrelations using ACF (Autocorrelation Function):
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(cal1.train, lag.max = 20)  
+pacf(cal1.train, lag.max = 20) 
+```
+
+We can see from the graph above that for Ninth Street, Berkeley (cal1) there are a number of autocorrelations present. The model should have q <=11 and p <=4. 
+
+**2.Estimation**
+
+```{r, eval=FALSE, include=FALSE}
+auto.arima(cal1.train, trace = TRUE, ic = 'bic', stepwise=FALSE)
+
+```
+
+By Running auto.arima() function, we have the following model with the best BIC score:
+
+Series: cal1.train 
+ARIMA(0,0,0)(2,0,0)[7] with non-zero mean 
+
+Coefficients:
+        sar1    sar2  intercept
+      0.4192  0.4292   137.1715
+s.e.  0.0965  0.1017    12.6231
+
+sigma^2 estimated as 750.1:  log likelihood=-390.39
+AIC=788.78   AICc=789.3   BIC=798.41
+
+It is important to note that these parameters fit findings of the 'identification' section.
+
+**3.1 Model Fit**
+
+```{r, echo=FALSE}
+cal1.arima <- Arima(cal1.train, order = c(0, 0, 0), seasonal = list(order = c(2, 0, 0), period = 7), include.drift = FALSE)
+
+plot(cal1.train, main ="ARIMA- Ninth Street, Berkeley (cal1)",ylab="Daily Demand")
+lines(fitted(cal1.arima), col = "blue", lty = 2)
+```
+
+From the graph above, we can see that ARIMA model follows the training set well.
+
+**3.2 Model Residuals Diagnostic**
+
+```{r, echo=FALSE}
+tsdiag(cal1.arima)
+```
+
+The graphs show:
+1. Stadardised Residuals: No clusters of volatility for standardised residuals
+2. ACF of residuals: No significant correlation between the residuals, however there is one minor autocorrelation present
+3. p values for L-B statistics: most p values are still above the threshold, but not by much- no clear pattern in residuals.
+
+Based on the above analysis, the model is fit for purpose. The fitness is not as strong as the models for ny1 and ny2, so it will be interesting to see how this model performs on the validation set.
+
+***
+
+#### **Shattuck Sq, Berkeley (cal2)**
+
+**1. Identification**
+
+```{r, include=FALSE}
+ndiffs(cal2.train)
+nsdiffs(cal2.train)
+cal2.df1 <- diff (cal2.train, differences=1)
+
+adf.test(cal2.df1)
+pp.test(cal2.df1)
+
+adf.test(cal2.train)
+pp.test(cal2.train)
+
+```
+
+Results of the test show the following:
+Required differencing: 0
+required seasonal differencing: 1
+
+After testing the model with no differentiation- both adf and pp tests (p values < 0.01) show that the time series is stationary.
+
+The next step is to test the time series on autocorrelations using ACF (Autocorrelation Function):
+
+```{r, echo=FALSE}
+par(mfrow=c(1,2))
+acf(cal2.train, lag.max = 20)  
+pacf(cal2.train, lag.max = 20) 
+```
+
+We can see from the graph above that for Shattuck Sq, Berkeley (cal2), the model should have q <=13 and p <=3
+
+**2.Estimation**
+
+
+```{r, eval=FALSE, include=FALSE}
+auto.arima(cal2.train, trace = TRUE, ic = 'bic', stepwise=FALSE)
+
+```
+
+By Running auto.arima() function, we have the following model with the best BIC score:
+
+Series: cal2.train 
+ARIMA(0,1,1)(0,1,1)[7]                    
+
+Coefficients:
+          ma1     sma1
+      -0.8133  -0.4955
+s.e.   0.0769   0.1643
+
+sigma^2 estimated as 2203:  log likelihood=-348.3
+AIC=702.6   AICc=702.99   BIC=709.17
+
+It is important to note that these parameters fit findings of the 'identification' section.
+
+#### **Model Validation**
+
+**3.1 Model Fit**
+```{r, echo=FALSE}
+cal2.arima <- Arima(cal2.train, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 1), period = 7), include.drift = FALSE)
+
+plot(cal2.train, main ="ARIMA- Shattuck Sq, Berkeley (cal2)",ylab="Daily Demand",)
+lines(fitted(cal2.arima), col = "blue", lty = 2)
+```
+
+From the graph above, we can see that ARIMA model follows the training set well.
+
+**3.2 Model Residuals Diagnostic**
+
+```{r, echo=FALSE}
+tsdiag(cal2.arima)
+```
+
+The graphs show:
+1. Stadardised Residuals: No clusters of volatility for standardised residuals
+2. ACF of residuals: No significant correlation between the residuals, although one of the lags is very close to the threshold
+3. p values for L-B statistics: most p values (except for 1) are large- no clear pattern in residuals.
+
+Based on the above analysis, the model is fit for purpose.
+
+### **3. Model Validation**
+
+####**3.1 Model Training Summary**
+
+Based on the analysis described in the section 2, I propose to test and validate the following models:
+
+Store | Store No. | Holt-W | Holt-W (EST) | ARIMA
+-|-|-|-|-
+ny1 |12631 |default: gamma = FALSE |ETS(M,N,M) | ARIMA(0,1,1)(1,0,0)[7]
+ny2 |20974 |default: gamma= FALSE |ETS(M,A,A)  | ARIMA(0,1,1)(0,1,1)[7]
+cal1 |46673 |default: gamma= TRUE |ETS(A,N,A) | ARIMA(0,0,0)(2,0,0)[7]
+cal2 |4904  |default: gamma= TRUE |ETS(A,A,A) | ARIMA(0,1,1)(0,1,1)[7]
+ 
+In this section I will apply these models to the validation set. The performance will be assessed by comparing  RMSE (Residual Mean Squared Errors) for the forecasted time series comparing the validation set.
+
+**3.2 Model Validation Assessment**
+ 
+####**Myrtle Avenue, Ridgewood (ny1)**
+
+Forecast of the demand values for the next 3 weeks using the chosen models produces the following:
+
+```{r, echo=FALSE}
+ny1.hw.f <- forecast.HoltWinters(ny1.hw, h=21)
+ny1.ets.f<- forecast.ets (ny1.ets, h=21)
+ny1.arima.f<- forecast.Arima(ny1.arima,h=21)
+
+plot(ny1.val, main ="Model Validation- Myrtle Avenue, Ridgewood (ny1)",ylab="Daily Demand")
+legend(2,375, c("Holt-Winters", "ETS", "ARIMA"), lty="dashed", col=c("blue","red", "green"))
+lines(fitted(ny1.hw.f), col = "blue", lty = 2)
+lines(fitted(ny1.ets.f), col = "red", lty = 2)
+lines(fitted(ny1.arima.f), col = "green", lty = 2)
+```
+
+Based on the chart above- all 3 models have somewhat forecasted the values below the validation set. Here are the results of the forecasts:
+
+```{r, echo=FALSE}
+ny1.forecast <- data.frame(row.names = c("2015-05-27","2015-05-28","2015-05-29","2015-05-30","2015-05-31","2015-06-01","2015-06-02","2015-06-03","2015-06-04","2015-06-05","2015-06-06","2015-06-07","2015-06-08","2015-06-09","2015-06-10","2015-06-11","2015-06-12","2015-06-13","2015-06-14","2015-06-15","2015-06-16"))
+ny1.forecast [c("Actuals","HW", "ETS","ARIMA")] <-c(ny1.val, round(ny1.hw.f$mean) , round(ny1.ets.f$mean), round(ny1.arima.f$mean))
+
+ny1.forecast
+```
+
+```{r, include=FALSE}
+ny1.hw.acc <- accuracy(ts(ny1.hw.f$mean,start= c(1,1)),ny1.val) #val 83.10
+ny1.ets.acc <- accuracy(ts(ny1.ets.f$mean, start= c(1,1)),ny1.val) #val 52.47
+ny1.arima.acc <- accuracy(ts(ny1.arima.f$mean, start=c(1,1)),ny1.val) #val 57.48
+
+```
+The models' forecast performance against validation set is summarised by the following RMSE values:
+
+HW = 83.10
+**ETS = 52.47**
+ARIMA = 57.48
+
+ETS has the lowest value and therefore preferable here.
+
+***
+
+**Whitney Avenue, Elmhurst (ny2)**
+
+Forecast of the demand values for the next 3 weeks using the chosen models produces the following:
+
+```{r, echo=FALSE}
+ny2.hw.f <- forecast.HoltWinters(ny2.hw, h=21)
+ny2.ets.f<- forecast.ets (ny2.ets, h=21)
+ny2.arima.f<- forecast.Arima(ny2.arima,h=21)
+
+plot(ny2.val, main ="Model Validation- Whitney Avenue, Elmhurst (ny2)",ylab="Daily Demand")
+legend(2.8,168, c("Holt-Winters", "ETS", "ARIMA"), lty="dashed", col=c("blue","red", "green"))
+lines(fitted(ny2.hw.f), col = "blue", lty = 2)
+lines(fitted(ny2.ets.f), col = "red", lty = 2)
+lines(fitted(ny2.arima.f), col = "green", lty = 2)
+```
+
+
+Results of the forecasts:
+
+```{r, echo=FALSE}
+ny2.forecast <- data.frame(row.names = c("2015-05-27","2015-05-28","2015-05-29","2015-05-30","2015-05-31","2015-06-01","2015-06-02","2015-06-03","2015-06-04","2015-06-05","2015-06-06","2015-06-07","2015-06-08","2015-06-09","2015-06-10","2015-06-11","2015-06-12","2015-06-13","2015-06-14","2015-06-15","2015-06-16"))
+ny2.forecast [c("Actuals","HW", "ETS","ARIMA")] <-c(ny2.val, round(ny2.hw.f$mean) , round(ny2.ets.f$mean), round(ny2.arima.f$mean))
+ny2.forecast
+
+```
+
+```{r, include=FALSE}
+ny2.hw.acc <- accuracy(ts(ny2.hw.f$mean,start= c(1,1)),ny2.val) #val 53.98
+ny2.ets.acc <- accuracy(ts(ny2.ets.f$mean, start= c(1,1)),ny2.val) #val 69.53
+ny2.arima.acc <- accuracy(ts(ny2.arima.f$mean, start=c(1,1)),ny2.val) #val 51.26
+
+```
+The models' forecast performance against validation set is summarised by the following RMSE values:
+
+HW = 53.98
+ETS = 69.53
+**ARIMA = 51.26**
+
+ARIMA has the lowest value and therefore preferable here. 
+ 
+***
+
+**Ninth Street, Berkeley (cal1)**
+
+Forecast of the demand values for the next 3 weeks using the chosen models produces the following:
+
+```{r, echo=FALSE}
+cal1.hw.f <- forecast.HoltWinters(cal1.hw, h=21)
+cal1.ets.f<- forecast.ets (cal1.ets, h=21)
+cal1.arima.f<- forecast.Arima(cal1.arima,h=21)
+
+plot(cal1.val, main ="Model Validation- Ninth Street, Berkeley (cal1)",ylab="Daily Demand")
+legend(0.95,249, c("Holt-Winters", "ETS", "ARIMA"), lty="dashed", col=c("blue","red", "green"))
+lines(fitted(cal1.hw.f), col = "blue", lty = 2)
+lines(fitted(cal1.ets.f), col = "red", lty = 2)
+lines(fitted(cal1.arima.f), col = "green", lty = 2)
+```
+
+Results of the forecasts:
+
+```{r, echo=FALSE}
+cal1.forecast <- data.frame(row.names = c("2015-05-27","2015-05-28","2015-05-29","2015-05-30","2015-05-31","2015-06-01","2015-06-02","2015-06-03","2015-06-04","2015-06-05","2015-06-06","2015-06-07","2015-06-08","2015-06-09","2015-06-10","2015-06-11","2015-06-12","2015-06-13","2015-06-14","2015-06-15","2015-06-16"))
+cal1.forecast [c("Actuals","HW", "ETS","ARIMA")] <-c(cal1.val, round(cal1.hw.f$mean) , round(cal1.ets.f$mean), round(cal1.arima.f$mean))
+cal1.forecast
+
+```
+
+```{r, echo=FALSE}
+cal1.hw.acc <- accuracy(ts(cal1.hw.f$mean,start= c(1,1)),cal1.val) 
+cal1.ets.acc <- accuracy(ts(cal1.ets.f$mean, start= c(1,1)),cal1.val) 
+cal1.arima.acc <- accuracy(ts(cal1.arima.f$mean, start=c(1,1)),cal1.val) 
+
+```
+The models' forecast performance against validation set is summarised by the following RMSE values:
+
+**HW = 24.78**
+ETS = 32.1
+ARIMA = 26.27
+
+Holt-Winters model has the lowest value and therefore preferable here. 
+
+***
+
+**Shattuck Sq, Berkeley (cal2)**
+
+Forecast of the demand values for the next 3 weeks using the chosen models produces the following:
+
+```{r, echo=FALSE}
+cal2.hw.f <- forecast.HoltWinters(cal2.hw, h=21)
+cal2.ets.f<- forecast.ets (cal2.ets, h=21)
+cal2.arima.f<- forecast.Arima(cal2.arima,h=21)
+
+plot(cal2.val, main ="Model Validation- Shattuck Sq, Berkeley (cal2)",ylab="Daily Demand")
+lines(fitted(cal2.hw.f), col = "blue", lty = 2)
+lines(fitted(cal2.ets.f), col = "red", lty = 2)
+lines(fitted(cal2.arima.f), col = "green", lty = 2)
+```
+
+Results of the forecasts:
+
+```{r, echo=FALSE}
+cal2.forecast <- data.frame(row.names = c("2015-05-27","2015-05-28","2015-05-29","2015-05-30","2015-05-31","2015-06-01","2015-06-02","2015-06-03","2015-06-04","2015-06-05","2015-06-06","2015-06-07","2015-06-08","2015-06-09","2015-06-10","2015-06-11","2015-06-12","2015-06-13","2015-06-14","2015-06-15","2015-06-16"))
+cal2.forecast [c("Actuals","HW", "ETS","ARIMA")] <-c(cal2.val, round(cal2.hw.f$mean) , round(cal2.ets.f$mean), round(cal2.arima.f$mean))
+cal2.forecast
+
+```
+
+```{r, include=FALSE}
+cal2.hw.acc <- accuracy(ts(cal2.hw.f$mean,start= c(1,1)),cal2.val) 
+cal2.ets.acc <- accuracy(ts(cal2.ets.f$mean, start= c(1,1)),cal2.val) 
+cal2.arima.acc <- accuracy(ts(cal2.arima.f$mean, start=c(1,1)),cal2.val) 
+
+```
+The models' forecast performance against validation set is summarised by the following RMSE values:
+
+HW = 71.75
+**ETS = 28.59**
+ARIMA = 66.63
+
+ETS model has the lowest value and therefore is preferable here.
+
+***
+
+**3.3 Model Validation Summary**
+
+Based on the analysis described in the section 2, I propose to test and validate the following models:
+
+Store | Store Number|  Best Model | RMSE value
+-|-|-|-
+Myrtle Avenue, Ridgewood (ny1) |12631 |ETS(M,N,M)  | 52.47
+Whitney Avenue, Elmhurst (ny2) |20974 |ARIMA(0,1,1)(0,1,1)[7] | 51.26
+Ninth Street, Berkeley (cal1) |46673 |HW (default) | 24.78
+Shattuck Sq, Berkeley (cal2) |4904  |ETS(A,A,A) | 28.59
+ 
+***
+
+### **4. Forecast**
+
+Based on the selected optimal models and their parameters, the prediction for the next two weeks will be performed by applying the models to the the whole period (training + validation sets):
+
+
+
+```{r, echo=FALSE}
+ny1.final.model <- ets(ny1,model = "MNM")
+ny1.final.forecast <- forecast.ets(ny1.final.model, h=14)
+
+ny2.final.model <- Arima(ny2, order = c(0, 1, 1), seasonal = list(order = c(0, 1, 1), period = 7), include.drift = FALSE)
+ny2.final.forecast <- forecast.Arima(ny2.final.model, h=14)
+
+cal1.final.model <- HoltWinters(cal1)
+cal1.final.forecast <- forecast.HoltWinters(cal1.final.model, h=14)
+
+cal2.final.model <- ets(cal2, model = "AAA")
+cal2.final.forecast <- forecast.ets(cal2.final.model, h=14)
+
+par(mfrow=c(2,2))
+plot(cal1.final.forecast, main="Ninth Street, Berkeley (cal1)- HW")
+plot(cal2.final.forecast, main="Shattuck Sq, Berkeley (cal2)- ETS")
+plot(ny1.final.forecast, main="Myrtle Avenue, Ridgewood (ny1)- ETS")
+plot(ny2.final.forecast, main="Whitney Avenue, Elmhurst (ny2)- ARIMA")
+
+```
+
+**Final forecast results (in ounces):**
+
+```{r, echo=FALSE}
+final.forecast <- data.frame(row.names =  c("2015-06-16","2015-06-17","2015-06-18","2015-06-19","2015-06-20","2015-06-21","2015-06-22","2015-06-23","2015-06-24","2015-06-25","2015-06-26","2015-06-27","2015-06-28","2015-06-29"))
+
+final.forecast [c("California 1 (ID:46673)","California 2 (ID:4904)", "New York 1 (ID:12631)","New York 2 (ID:20974)")] <-c(round(cal1.final.forecast$mean) ,round(cal2.final.forecast$mean), round(ny1.final.forecast$mean), round(ny2.final.forecast$mean))
+final.forecast
+
+#write.csv(final.forecast,"finalforecast AR.csv")
+```
+
+
+
+
+
